@@ -1,0 +1,134 @@
+@startuml pi-request-to-llm-sequence
+!theme plain
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+
+title Detailed Flow: User Request → Agent Loop → LLM (Opus / GPT / ...)
+
+actor User as "User\n(Terminal / pipe / RPC / SDK)"
+participant CLI as "main.ts\nparseArgs()"
+participant Mode as "Mode Layer\nInteractive | Print | RPC"
+participant Runtime as "AgentSessionRuntime"
+participant Session as "AgentSession\n.prompt()"
+participant Ext as "ExtensionRunner\n+ Skills/Templates"
+participant Agent as "Agent\n(pi-agent-core)"
+participant Loop as "agent-loop.ts\nrunAgentLoop / runLoop"
+participant Tools as "AgentTool[]\nread/bash/edit/..."
+participant Stream as "pi-ai\nstreamSimple()"
+participant Reg as "api-registry\ngetApiProvider(api)"
+participant Prov as "Provider Module\ne.g. anthropic.ts\nopenai-completions.ts"
+participant SDK as "Vendor SDK\n@anthropic-ai/sdk\nopenai ..."
+participant API as "Remote API\napi.anthropic.com\napi.openai.com\n..."
+
+== Entry: outside world ==
+
+User -> CLI : argv / stdin / RPC JSON\n"fix the bug in foo.ts"
+CLI -> CLI : configureHttpDispatcher()\ncreateAgentSessionRuntime()
+CLI -> Runtime : resolve cwd, SessionManager,\nModelRegistry, AuthStorage
+Runtime -> Session : createAgentSession()\nmodel + tools + systemPrompt
+
+alt Interactive TUI
+  Mode <- CLI : InteractiveMode
+  User -> Mode : type in editor, Enter
+  Mode -> Session : session.prompt(text)
+else Print mode (-p)
+  Mode <- CLI : runPrintMode()
+  Mode -> Session : session.prompt(initialMessage)
+else RPC / SDK
+  Mode <- CLI : runRpcMode() or embed SDK
+  Mode -> Session : session.prompt(...) / RPC handler
+end
+
+== AgentSession: pre-LLM processing ==
+
+Session -> Session : validate model + API key\n(OAuth / auth.json / env)
+Session -> Ext : emitInput (optional transform)
+Session -> Ext : expand /skill, @file templates
+Session -> Ext : emitBeforeAgentStart\n(system prompt, extra messages)
+
+alt Extension slash command (/cmd)
+  Session -> Ext : _tryExecuteExtensionCommand
+  Ext --> User : handled locally (may call prompt again)
+  note right of Ext
+    Extension may call pi.sendMessage()
+    and start its own agent turns
+  end note
+else Normal user message
+  Session -> Session : build AgentMessage[]\nrole=user + images
+  Session -> Agent : agent.prompt(messages)
+end
+
+== Agent: start loop ==
+
+Agent -> Loop : runAgentLoop(messages, context, config,\nstreamFn, signal)
+Loop -> Loop : emit agent_start, turn_start\nappend user messages to context
+
+== Inner turn loop (may repeat) ==
+
+loop Until no tool calls and no follow-up queue
+
+  Loop -> Loop : transformContext? (compaction, etc.)
+  Loop -> Loop : convertToLlm(AgentMessage[] → Message[])
+  Loop -> Loop : build Context\n{systemPrompt, messages, tools}
+
+  Loop -> Stream : streamFn(model, llmContext, {apiKey, signal, reasoning...})
+  note over Loop, Stream
+    Default streamFn = streamSimple
+    coding-agent may inject custom streamFn
+  end note
+
+  Stream -> Reg : resolveApiProvider(model.api)
+  Reg -> Prov : lazy import provider\n(e.g. "anthropic-messages")
+
+  Prov -> Prov : transformMessages()\nmap tools to provider format\n(thinking budget, cache headers)
+
+  Prov -> SDK : HTTP streaming request
+  alt Anthropic (Claude Opus etc.)
+    SDK -> API : POST messages.create({stream:true})\nmodel: claude-opus-4-7 ...
+  else OpenAI Completions (GPT-5.x etc.)
+    SDK -> API : POST chat.completions.create({stream:true})\nmodel: gpt-5.4 ...
+  else Bedrock / Vertex / Copilot / ...
+    SDK -> API : provider-specific endpoint
+  end
+
+  == SSE / chunk stream back ==
+
+  API --> SDK : raw stream chunks
+  SDK --> Prov : parse events
+  Prov --> Stream : standardized events\nstart | text_delta | thinking_delta\n| toolcall_* | done | error
+  Stream --> Loop : for await (event of response)
+
+  loop Each stream event
+    Loop -> Loop : update partial AssistantMessage\nin context.messages
+    Loop -> Agent : emit message_update / message_end
+    Agent -> Session : subscribe listeners
+    Session -> Mode : TUI render / JSON lines / RPC events
+    Mode --> User : streamed text + tool call UI
+  end
+
+  Loop -> Loop : response.result() → final AssistantMessage
+
+  alt Assistant issued tool_call(s)
+    Loop -> Tools : executeToolCalls (parallel|sequential)
+    Tools -> Tools : beforeToolCall hook (extensions)
+    Tools -> Tools : run bash/read/write/edit...
+    Tools --> Loop : ToolResultMessage[]
+    Loop -> Loop : append tool results to context
+    note right of Loop
+      Next iteration sends
+      user+assistant+toolResult
+      back to LLM (multi-turn tool loop)
+    end note
+  else No tool calls
+    Loop -> Loop : check steering / follow-up queues
+  end
+
+  Loop -> Loop : prepareNextTurn? (model switch, compaction)
+  Loop -> Loop : shouldStopAfterTurn?
+end
+
+Loop -> Loop : emit agent_end
+Agent -> Session : waitForIdle, persist branch (SessionManager)
+Mode --> User : final answer / exit code
+
+@enduml
