@@ -1,0 +1,39 @@
+@startuml pi-model-to-provider
+!theme plain
+skinparam shadowing false
+
+title Model ID → API → Remote Endpoint (examples from model-resolver)
+
+object "User selects or defaults" as sel {
+  anthropic / claude-opus-4-7
+  openai / gpt-5.4
+  openai-codex / gpt-5.5
+  amazon-bedrock / us.anthropic.claude-opus-4-6-v1
+}
+
+object "Model record (pi-ai)" as model {
+  id = "claude-opus-4-7"
+  provider = "anthropic"
+  api = "anthropic-messages"
+  baseUrl = optional override
+}
+
+object "Provider file" as file {
+  anthropic.ts → api "anthropic-messages"
+  openai-completions.ts → "openai-completions"
+  openai-responses.ts → "openai-responses"
+  amazon-bedrock.ts → bedrock converse
+}
+
+object "HTTP destination" as http {
+  Anthropic Messages API
+  OpenAI Chat Completions
+  OpenAI Responses / Codex
+  AWS Bedrock Converse
+}
+
+sel --> model : ModelRegistry.find()\nAuthStorage credentials
+model --> file : getApiProvider(model.api)
+file --> http : SDK client + stream
+
+@enduml

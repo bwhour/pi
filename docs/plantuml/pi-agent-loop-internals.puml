@@ -1,0 +1,43 @@
+@startuml pi-agent-loop-internals
+!theme plain
+skinparam shadowing false
+
+title agent-loop.ts: One LLM Turn (streamAssistantResponse)
+
+participant Loop as "runLoop()"
+participant SAR as "streamAssistantResponse()"
+participant Ctx as "AgentContext"
+participant SF as "streamFn\n(default streamSimple)"
+participant AI as "pi-ai stream.ts"
+participant P as "Provider"
+
+Loop -> SAR : each assistant turn
+SAR -> Ctx : messages = transformContext?(messages)
+SAR -> Ctx : llmMessages = convertToLlm(messages)
+note right of Ctx
+  Filters to user | assistant | toolResult
+  for provider wire format
+end note
+
+SAR -> SAR : llmContext = {\n  systemPrompt,\n  messages: llmMessages,\n  tools\n}
+SAR -> SAR : apiKey = getApiKey(provider) || config.apiKey
+SAR -> SF : streamFunction(model, llmContext, options)
+
+SF -> AI : streamSimple(model, context, options)
+AI -> P : provider.streamSimple(model, context)
+P -> P : build request payload\n+ vendor tool names
+P -> P : HTTPS SSE stream
+
+P --> SAR : AssistantMessageEventStream
+SAR -> Loop : case start: push partial assistant
+SAR -> Loop : case text_delta / thinking_delta / toolcall_*
+SAR -> Loop : case done|error: finalize message
+
+alt toolCall blocks in final message
+  Loop -> Loop : executeToolCalls → ToolResultMessage[]
+  Loop -> Loop : continue runLoop (another SAR call)
+else plain text answer
+  Loop -> Loop : turn_end → maybe stop or follow-up
+end
+
+@enduml
