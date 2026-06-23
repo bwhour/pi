@@ -1,0 +1,64 @@
+@startuml pi-architecture-layers
+!theme plain
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+title Pi: External Request → LLM Provider Stack
+
+actor "User / Script / RPC Client" as User
+
+package "packages/coding-agent" as CA {
+  [cli.ts / main.ts] as CLI
+  [InteractiveMode\n(TUI)] as TUI
+  [PrintMode\n-p / --mode json] as Print
+  [RpcMode\nJSON-RPC] as RPC
+  [AgentSessionRuntime] as Runtime
+  [AgentSession\nprompt / tools / extensions] as Session
+  [SessionManager\nJSONL persistence] as SM
+  [ModelRegistry +\nAuthStorage] as Auth
+  [Built-in Tools\nread write edit bash grep ...] as Tools
+}
+
+package "packages/agent" as AG {
+  [Agent\nagent.prompt()] as Agent
+  [agent-loop.ts\nrunLoop] as Loop
+}
+
+package "packages/ai" as AI {
+  [stream.ts\nstream / streamSimple] as StreamAPI
+  [api-registry\nlazy providers] as Registry
+  [anthropic.ts\nopenai-completions.ts\nbedrock google ...] as Providers
+}
+
+package "packages/tui" as TUI {
+  [TUI + Components\nstdin/keybindings] as TUIlib
+}
+
+cloud "Remote LLM APIs" as Cloud {
+  [api.anthropic.com\nClaude Opus/Sonnet...] as AnthropicAPI
+  [api.openai.com\nGPT-5.x ...] as OpenAIAPI
+  [Other gateways\nBedrock Vertex Copilot...] as OtherAPI
+}
+
+User --> CLI
+CLI --> TUI : default interactive
+CLI --> Print : -p / pipe stdin
+CLI --> RPC : --mode rpc
+TUI --> TUIlib
+TUI --> Runtime
+Print --> Runtime
+RPC --> Runtime
+Runtime --> Session
+Session --> Agent
+Session --> SM
+Session --> Auth
+Session --> Tools
+Agent --> Loop
+Loop --> StreamAPI : streamFn (default streamSimple)
+StreamAPI --> Registry
+Registry --> Providers
+Providers --> AnthropicAPI
+Providers --> OpenAIAPI
+Providers --> OtherAPI
+
+@enduml
